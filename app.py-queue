@@ -1,0 +1,99 @@
+# python 3.6
+import os
+import requests
+import base64
+import time
+import librosa
+import random
+import time
+from loguru import logger
+from infer import VietASR
+from paho.mqtt import client as mqtt_client
+import json
+
+
+config = 'configs/quartznet12x1_vi.yaml'
+encoder_checkpoint = 'models/acoustic_model/vietnamese/JasperEncoder-STEP-289936.pt'
+decoder_checkpoint = 'models/acoustic_model/vietnamese/JasperDecoderForCTC-STEP-289936.pt'
+lm_path = 'models/language_model/3-gram-lm.binary'
+
+vietasr = VietASR(
+    config_file=config,
+    encoder_checkpoint=encoder_checkpoint,
+    decoder_checkpoint=decoder_checkpoint,
+    lm_path=lm_path,
+    beam_width=50
+)
+
+STATIC_DIR = "static"
+UPLOAD_DIR = "upload"
+RECORD_DIR = "record"
+
+os.makedirs(os.path.join(STATIC_DIR, UPLOAD_DIR), exist_ok=True)
+os.makedirs(os.path.join(STATIC_DIR, RECORD_DIR), exist_ok=True)
+
+broker = '192.168.1.11'
+port = 1883
+topic_request = "/stt/request"
+topic_response = "/stt/response"
+# generate client ID with pub prefix randomly
+client_id = 'viet-asr'
+username = 'asr'
+password = '123456'
+
+def connect_mqtt():
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            logger.info("Connected to MQTT Broker!")
+        else:
+            logger.info("Failed to connect, return code %d\n", rc)
+
+    c = mqtt_client.Client(client_id)
+    c.username_pw_set(username, password)
+    c.on_connect = on_connect
+    c.connect(broker, port)
+    return c
+
+def on_message(client, userdata, msg):
+    message = json.loads(msg.payload.decode());
+    logger.info(f"Received message from `{msg.topic}` topic")
+    filename = time.strftime("%Y%m%d_%H%M%S")
+    filepath = os.path.join(STATIC_DIR, RECORD_DIR, filename + ".wav")
+    audio_file = open(filepath, "wb")
+    decode_string = base64.b64decode(message["audio_base64"])
+    audio_file.write(decode_string)
+    logger.info("asr processing...")
+    audio_signal, _ = librosa.load(filepath, sr=16000)
+    transcript = vietasr.transcribe(audio_signal)
+    logger.success(f'transcript: {transcript}')
+    publish(client, {'filepath': filepath, 'transcript': transcript})
+
+
+def subscribe(client):
+    client.subscribe(topic_request)
+    client.on_message = on_message
+    logger.info(f"Subscribed to topic `{topic_request}`")
+
+
+def publish(client, data):
+    msg_count = 0
+    msg = json.dumps(data)
+    result = client.publish(topic_response, msg)
+    # result: [0, 1]
+    status = result[0]
+    if status == 0:
+        logger.info(f"Send `{msg}` to topic `{topic_response}`")
+    else:
+        logger.info(f"Failed to send message to topic {topic_response}")
+
+
+def run():
+    logger.info("App starting...")
+    client = connect_mqtt()
+    subscribe(client)
+    client.loop_forever()
+    
+
+
+if __name__ == '__main__':
+    run()
